@@ -114,6 +114,7 @@ const GESTURES = {
 };
 const DEBOUNCE_MS = 100;
 const FACE_EVERY = 3;
+const MOUTH_TONGUE = 0.05, MOUTH_SCREAM = 0.15;
 
 // ---------- theme ----------
 const themeBtn = document.getElementById('theme');
@@ -154,18 +155,22 @@ show('idle');
 // ---------- gesture logic (rotation-invariant) ----------
 const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 const FINGERS = { index: [8, 6, 5], middle: [12, 10, 9], ring: [16, 14, 13], pinky: [20, 18, 17] };
-function fingerExt(lm, [tip, pip, mcp]) { return d(lm[tip], lm[mcp]) > d(lm[pip], lm[mcp]) * 1.05; }
-function fingerClosed(lm, [tip, pip, mcp]) { return d(lm[tip], lm[mcp]) < d(lm[pip], lm[mcp]) * 1.1; }
+function fingerExt(lm, [tip, pip, mcp]) {
+  return d(lm[tip], lm[mcp]) > d(lm[pip], lm[mcp]) * 1.05 && d(lm[tip], lm[0]) > d(lm[pip], lm[0]);
+}
 function thumbExt(lm) {
   return d(lm[4], lm[0]) > d(lm[3], lm[0]) * 1.05 && d(lm[4], lm[5]) > d(lm[3], lm[5]) * 1.05;
 }
 function analyze(lm) {
-  const e = {}, c = {};
-  for (const [n, idx] of Object.entries(FINGERS)) { e[n] = fingerExt(lm, idx); c[n] = fingerClosed(lm, idx); }
+  const e = {};
+  for (const [n, idx] of Object.entries(FINGERS)) e[n] = fingerExt(lm, idx);
   e.thumb = thumbExt(lm);
+  const c = { index: !e.index, middle: !e.middle, ring: !e.ring, pinky: !e.pinky };
   const center = { x: (lm[0].x + lm[9].x) / 2, y: (lm[0].y + lm[9].y) / 2 };
+  const palm = d(lm[5], lm[17]) || 1;
   return { lm, e, c, center,
-    fist: !e.thumb && !e.index && !e.middle && !e.ring && !e.pinky,
+    spread: d(lm[8], lm[20]) / palm,
+    fist: c.index && c.middle && c.ring && c.pinky,
     thumbsUp: e.thumb && lm[4].y < lm[3].y && c.index && c.middle && c.ring && c.pinky,
     middleOnly: e.middle && c.index && c.ring && c.pinky,
     peace: e.index && e.middle && c.ring && c.pinky,
@@ -173,11 +178,12 @@ function analyze(lm) {
     open4: e.index && e.middle && e.ring && e.pinky,
   };
 }
-function classify(hands, mouth) {
+function classify(hands, mouth, mouthPos) {
   const H = hands.map(analyze);
   if (H.length >= 2) {
     const [a, b] = H, dist = d(a.center, b.center);
-    if (dist < 0.30) return 'prayer';
+    // ладони вместе: центры рядом и кончики пальцев соприкасаются
+    if (dist < 0.25 && d(a.lm[12], b.lm[12]) < 0.15) return 'prayer';
     if (a.middleOnly && b.middleOnly) return 'middlefinger';
     if (a.peace && b.peace) return 'peace';
     if (a.center.y < 0.55 && b.center.y < 0.55 && dist > 0.3) return 'shocked';
@@ -185,11 +191,17 @@ function classify(hands, mouth) {
   if (H.some(h => h.middleOnly)) return 'middlefinger';
   if (H.some(h => h.thumbsUp)) return 'thumbsup';
   if (H.some(h => h.peace)) return 'peace';
-  if (H.some(h => h.shh && h.center.x > 0.2 && h.center.x < 0.8 && h.center.y > 0.2 && h.center.y < 0.75)) return 'shh';
-  if (H.some(h => h.open4 && h.center.y < 0.55)) return 'shocked';
+  const nearMouth = h => mouthPos && d(h.lm[8], mouthPos) < 0.16;
+  if (H.some(h => h.shh && (nearMouth(h) || (h.center.x > 0.1 && h.center.x < 0.9 && h.center.y > 0.15 && h.center.y < 0.85)))) return 'shh';
+  // одна рука: пальцы врозь и высоко = шок; пальцы вместе по центру (слитые ладони) = молитва
+  const open = H.find(h => h.open4);
+  if (open) {
+    if (open.spread >= 1.4 && open.center.y < 0.55) return 'shocked';
+    if (open.spread < 1.4 && open.center.x > 0.3 && open.center.x < 0.7) return 'prayer';
+  }
   if (H.some(h => h.fist)) return 'bicep';
-  if (mouth > 0.25) return 'scream';
-  if (mouth >= 0.12) return 'tongue';
+  if (mouth > MOUTH_SCREAM) return 'scream';
+  if (mouth >= MOUTH_TONGUE) return 'tongue';
   return 'idle';
 }
 
@@ -203,7 +215,7 @@ const loadText = document.getElementById('loadText');
 const barFill = document.querySelector('#bar i');
 const progress = p => { barFill.style.width = p + '%'; };
 
-let mouth = 0, current = 'idle', pending = 'idle', pendingSince = 0, frame = 0;
+let mouth = 0, mouthPos = null, current = 'idle', pending = 'idle', pendingSince = 0, frame = 0;
 const accent = () => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
 
 function updateGesture(g, now) {
@@ -222,7 +234,7 @@ function onHands(res) {
     drawConnectors(ctx, lm, HAND_CONNECTIONS, { color: col, lineWidth: 3 });
     drawLandmarks(ctx, lm, { color: '#fff', fillColor: col, lineWidth: 1, radius: 3 });
   }
-  const g = classify(hands, mouth);
+  const g = classify(hands, mouth, mouthPos);
   updateGesture(g, now);
   if (now > manualUntil && shown !== current) show(current);
   const states = hands.map(lm => {
@@ -234,7 +246,8 @@ function onHands(res) {
 
 function onFace(res) {
   const lm = res.multiFaceLandmarks && res.multiFaceLandmarks[0];
-  if (!lm) { mouth = 0; return; }
+  if (!lm) { mouth = 0; mouthPos = null; return; }
+  mouthPos = { x: (lm[13].x + lm[14].x) / 2, y: (lm[13].y + lm[14].y) / 2 };
   const faceH = Math.abs(lm[152].y - lm[10].y);
   mouth = faceH > 0 ? Math.abs(lm[14].y - lm[13].y) / faceH : 0;
 }
