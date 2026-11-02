@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gesture Meme Cam</title>
+<style>
+:root {
+  --bg: #fbf7f1;
+  --panel: #f1ebe2;
+  --text: #3a3733;
+  --muted: #8a8378;
+  --accent: #5B8DEF;
+  --accent-soft: rgba(91, 141, 239, .15);
+  --border: #e2dacd;
+}
+:root[data-theme="dark"] {
+  --bg: #26282c;
+  --panel: #1f2023;
+  --text: #e6e4df;
+  --muted: #8e8f94;
+  --accent: #7ba3f2;
+  --accent-soft: rgba(123, 163, 242, .18);
+  --border: #37393e;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: 'Comic Sans MS', 'Comic Sans', cursive;
+  font-size: 15px;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: background .2s, color .2s;
+}
+#theme {
+  position: fixed; top: 10px; left: 10px; z-index: 20;
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  cursor: pointer; font-size: 15px; line-height: 1; opacity: .85;
+}
+#theme:hover { opacity: 1; }
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px 12px 6px; }
+.pane { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; min-height: 0; }
+#meme img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 150ms ease; }
+#meme img.active { opacity: 1; }
+#badge {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 3;
+  background: var(--accent); color: #fff; padding: 6px 16px; border-radius: 20px; white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,.2);
+}
+#hint { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 3; padding: 4px 12px; border-radius: 12px;
+  background: rgba(0,0,0,.45); color: #fff; font-size: 13px; white-space: nowrap; }
+#cam video, #cam canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+#debug {
+  position: absolute; right: 8px; top: 8px; z-index: 3; font: 12px/1.5 ui-monospace, Menlo, monospace;
+  background: rgba(0,0,0,.55); color: #e8e8e8; padding: 6px 10px; border-radius: 8px; white-space: pre;
+}
+#loading {
+  position: absolute; inset: 0; z-index: 10; background: var(--panel);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 20px;
+}
+#bar { width: min(260px, 70%); height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+#bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+#thumbs { display: flex; gap: 8px; padding: 6px 12px 12px; overflow-x: auto; justify-content: center; }
+.th { flex: 0 0 auto; width: 74px; text-align: center; cursor: pointer; font-size: 11px; color: var(--muted); }
+.th img { width: 74px; height: 54px; object-fit: cover; border-radius: 8px; border: 2px solid transparent; display: block; margin-bottom: 3px; transition: border-color .15s, transform .15s; }
+.th:hover img { transform: translateY(-2px); }
+.th.active img { border-color: var(--accent); }
+.th.active { color: var(--text); }
+@media (max-width: 720px) {
+  main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+  #theme { top: 6px; left: 6px; }
+}
+</style>
+</head>
+<body>
+<button id="theme" title="Тема" aria-label="Сменить тему">☾</button>
+<main>
+  <section class="pane" id="meme">
+    <div id="hint"></div>
+    <div id="badge"></div>
+  </section>
+  <section class="pane" id="cam">
+    <video id="video" playsinline muted></video>
+    <canvas id="overlay"></canvas>
+    <div id="debug"></div>
+    <div id="loading">
+      <div id="loadText">Загружаю модели…</div>
+      <div id="bar"><i></i></div>
+    </div>
+  </section>
+</main>
+<div id="thumbs"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js" crossorigin="anonymous"></script>
+<script>
+const GESTURES = {
+  idle:         { img: 'images/idle.jpg',         name: 'Ждём жест',       hint: 'Покажи любой жест' },
+  bicep:        { img: 'images/bicep.jpg',        name: 'Кулак',           hint: 'Покажи кулак' },
+  thumbsup:     { img: 'images/thumbsup.jpg',     name: 'Лайк',            hint: 'Большой палец вверх' },
+  middlefinger: { img: 'images/middlefinger.jpg', name: 'Средний палец',   hint: 'Покажи средний палец' },
+  shocked:      { img: 'images/shocked.jpg',      name: 'Шок',             hint: 'Подними руки вверх, пальцы врозь' },
+  prayer:       { img: 'images/prayer.jpg',       name: 'Молитва',         hint: 'Сложи руки вместе' },
+  tongue:       { img: 'images/tongue.jpg',       name: 'Язык',            hint: 'Приоткрой рот' },
+  scream:       { img: 'images/scream.jpg',       name: 'Крик',            hint: 'Открой рот широко' },
+  shh:          { img: 'images/shh.jpg',          name: 'Тссс',            hint: 'Палец к губам' },
+  peace:        { img: 'images/peace.jpg',        name: 'Пис',             hint: 'Покажи ✌️' },
+};
+const DEBOUNCE_MS = 100;
+const FACE_EVERY = 3;
+
+// ---------- theme ----------
+const themeBtn = document.getElementById('theme');
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  themeBtn.textContent = t === 'dark' ? '☀' : '☾';
+  try { localStorage.setItem('gmc-theme', t); } catch (e) {}
+}
+let saved = null;
+try { saved = localStorage.getItem('gmc-theme'); } catch (e) {}
+setTheme(saved || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+themeBtn.onclick = () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+
+// ---------- UI: meme layers + thumbs (all images preloaded in DOM) ----------
+const memePane = document.getElementById('meme');
+const badge = document.getElementById('badge');
+const hint = document.getElementById('hint');
+const thumbs = document.getElementById('thumbs');
+const layers = {}, thumbEls = {};
+for (const [key, g] of Object.entries(GESTURES)) {
+  const img = new Image(); img.src = g.img; img.alt = g.name;
+  memePane.insertBefore(img, hint); layers[key] = img;
+  const t = document.createElement('div'); t.className = 'th';
+  t.innerHTML = `<img src="${g.img}" alt=""><span>${g.name}</span>`;
+  t.onclick = () => { manualUntil = performance.now() + 2500; show(key); };
+  thumbs.appendChild(t); thumbEls[key] = t;
+}
+let shown = null, manualUntil = 0;
+function show(key) {
+  if (key === shown) return;
+  if (shown) { layers[shown].classList.remove('active'); thumbEls[shown].classList.remove('active'); }
+  layers[key].classList.add('active'); thumbEls[key].classList.add('active');
+  badge.textContent = GESTURES[key].name; hint.textContent = GESTURES[key].hint;
+  shown = key;
+}
+show('idle');
+
+// ---------- gesture logic (rotation-invariant) ----------
+const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const FINGERS = { index: [8, 6, 5], middle: [12, 10, 9], ring: [16, 14, 13], pinky: [20, 18, 17] };
+function fingerExt(lm, [tip, pip, mcp]) { return d(lm[tip], lm[mcp]) > d(lm[pip], lm[mcp]) * 1.05; }
+function fingerClosed(lm, [tip, pip, mcp]) { return d(lm[tip], lm[mcp]) < d(lm[pip], lm[mcp]) * 1.1; }
+function thumbExt(lm) {
+  return d(lm[4], lm[0]) > d(lm[3], lm[0]) * 1.05 && d(lm[4], lm[5]) > d(lm[3], lm[5]) * 1.05;
+}
+function analyze(lm) {
+  const e = {}, c = {};
+  for (const [n, idx] of Object.entries(FINGERS)) { e[n] = fingerExt(lm, idx); c[n] = fingerClosed(lm, idx); }
+  e.thumb = thumbExt(lm);
+  const center = { x: (lm[0].x + lm[9].x) / 2, y: (lm[0].y + lm[9].y) / 2 };
+  return { lm, e, c, center,
+    fist: !e.thumb && !e.index && !e.middle && !e.ring && !e.pinky,
+    thumbsUp: e.thumb && lm[4].y < lm[3].y && c.index && c.middle && c.ring && c.pinky,
+    middleOnly: e.middle && c.index && c.ring && c.pinky,
+    peace: e.index && e.middle && c.ring && c.pinky,
+    shh: e.index && c.middle && c.ring && c.pinky,
+    open4: e.index && e.middle && e.ring && e.pinky,
+  };
+}
+function classify(hands, mouth) {
+  const H = hands.map(analyze);
+  if (H.length >= 2) {
+    const [a, b] = H, dist = d(a.center, b.center);
+    if (dist < 0.30) return 'prayer';
+    if (a.middleOnly && b.middleOnly) return 'middlefinger';
+    if (a.peace && b.peace) return 'peace';
+    if (a.center.y < 0.55 && b.center.y < 0.55 && dist > 0.3) return 'shocked';
+  }
+  if (H.some(h => h.middleOnly)) return 'middlefinger';
+  if (H.some(h => h.thumbsUp)) return 'thumbsup';
+  if (H.some(h => h.peace)) return 'peace';
+  if (H.some(h => h.shh && h.center.x > 0.2 && h.center.x < 0.8 && h.center.y > 0.2 && h.center.y < 0.75)) return 'shh';
+  if (H.some(h => h.open4 && h.center.y < 0.55)) return 'shocked';
+  if (H.some(h => h.fist)) return 'bicep';
+  if (mouth > 0.25) return 'scream';
+  if (mouth >= 0.12) return 'tongue';
+  return 'idle';
+}
+
+// ---------- tracking ----------
+const video = document.getElementById('video');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const debug = document.getElementById('debug');
+const loading = document.getElementById('loading');
+const loadText = document.getElementById('loadText');
+const barFill = document.querySelector('#bar i');
+const progress = p => { barFill.style.width = p + '%'; };
+
+let mouth = 0, current = 'idle', pending = 'idle', pendingSince = 0, frame = 0;
+const accent = () => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+
+function updateGesture(g, now) {
+  if (g === current) { pending = g; return; }
+  if (g !== pending) { pending = g; pendingSince = now; }
+  if (now - pendingSince >= DEBOUNCE_MS) { current = g; if (now > manualUntil) show(g); }
+}
+
+function onHands(res) {
+  const now = performance.now();
+  if (canvas.width !== video.videoWidth) { canvas.width = video.videoWidth; canvas.height = video.videoHeight; }
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const hands = res.multiHandLandmarks || [];
+  const col = accent();
+  for (const lm of hands) {
+    drawConnectors(ctx, lm, HAND_CONNECTIONS, { color: col, lineWidth: 3 });
+    drawLandmarks(ctx, lm, { color: '#fff', fillColor: col, lineWidth: 1, radius: 3 });
+  }
+  const g = classify(hands, mouth);
+  updateGesture(g, now);
+  if (now > manualUntil && shown !== current) show(current);
+  const states = hands.map(lm => {
+    const a = analyze(lm);
+    return ['thumb', 'index', 'middle', 'ring', 'pinky'].map(f => a.e[f] ? '1' : '0').join('');
+  }).join(' | ') || '-';
+  debug.textContent = `hands: ${hands.length}\nTIMRP: ${states}\nmouth: ${mouth.toFixed(3)}\ngesture: ${current}`;
+}
+
+function onFace(res) {
+  const lm = res.multiFaceLandmarks && res.multiFaceLandmarks[0];
+  if (!lm) { mouth = 0; return; }
+  const faceH = Math.abs(lm[152].y - lm[10].y);
+  mouth = faceH > 0 ? Math.abs(lm[14].y - lm[13].y) / faceH : 0;
+}
+
+async function start() {
+  try {
+    const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+    hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+    hands.onResults(onHands);
+    const face = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}` });
+    face.setOptions({ maxNumFaces: 1, refineLandmarks: false, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    face.onResults(onFace);
+
+    progress(10); loadText.textContent = 'Загружаю модель рук…';
+    await hands.initialize(); progress(45);
+    loadText.textContent = 'Загружаю модель лица…';
+    await face.initialize(); progress(80);
+    loadText.textContent = 'Включаю камеру…';
+
+    const cam = new Camera(video, {
+      width: 640, height: 480,
+      onFrame: async () => {
+        await hands.send({ image: video });
+        if (frame++ % FACE_EVERY === 0) await face.send({ image: video });
+      },
+    });
+    await cam.start();
+    progress(100);
+    setTimeout(() => loading.remove(), 250);
+  } catch (err) {
+    console.error(err);
+    loadText.textContent = 'Не удалось запустить камеру или модели. Разреши доступ к камере и обнови страницу.';
+    document.getElementById('bar').style.display = 'none';
+  }
+}
+start();
+</script>
+</body>
+</html>
